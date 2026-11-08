@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VLESS WS Tester</title></head>
+<body>
+<h1>VLESS over WebSocket tester</h1>
+<pre id="out">starting...</pre>
+<script>
+const out = document.getElementById('out');
+function log(s){ out.textContent += '\n' + s; }
+const p = new URLSearchParams(location.hash.slice(1));
+const host = p.get('host'), wsPath = p.get('path'), uuid = p.get('uuid');
+function uuidBytes(u){
+  const h = u.replace(/-/g,'');
+  const b = new Uint8Array(16);
+  for (let i=0;i<16;i++) b[i]=parseInt(h.substr(i*2,2),16);
+  return b;
+}
+function vlessHeader(domain, port){
+  const ub = uuidBytes(uuid);
+  const db = new TextEncoder().encode(domain);
+  const h = new Uint8Array(1+16+1+1+2+1+1+db.length);
+  let o=0;
+  h[o++]=0; h.set(ub,o); o+=16; h[o++]=0; h[o++]=1;
+  h[o++]=(port>>8)&255; h[o++]=port&255;
+  h[o++]=2; h[o++]=db.length; h.set(db,o);
+  return h;
+}
+function test(domain, port, httpReq){
+  return new Promise((resolve)=>{
+    const ws = new WebSocket('wss://'+host+wsPath);
+    ws.binaryType='arraybuffer';
+    const chunks=[];
+    let done=false;
+    const finish=(label)=>{
+      if(done) return; done=true;
+      try{ ws.close(); }catch(e){}
+      const total=new Uint8Array(chunks.reduce((a,c)=>a+c.byteLength,0));
+      let off=0; for(const c of chunks){ total.set(new Uint8Array(c),off); off+=c.byteLength; }
+      const http = total.length>2 ? total.slice(2) : total;
+      const txt = new TextDecoder().decode(http);
+      const parts = txt.split('\r\n\r\n');
+      const head = parts[0] || '';
+      const body = parts.slice(1).join('\r\n\r\n').trim();
+      resolve({label, status: head.split('\r\n')[0], body, rawBytes: total.length});
+    };
+    ws.onopen=()=>{
+      const header = vlessHeader(domain, port);
+      const payload = new TextEncoder().encode(httpReq);
+      const msg = new Uint8Array(header.length+payload.length);
+      msg.set(header,0); msg.set(payload,header.length);
+      ws.send(msg);
+    };
+    ws.onmessage=(e)=>{ chunks.push(e.data); };
+    ws.onclose=()=>finish('closed');
+    ws.onerror=()=>{ log('WS error for '+domain); finish('error'); };
+    setTimeout(()=>finish('timeout'), 20000);
+  });
+}
+(async()=>{
+  if(!host||!wsPath||!uuid){ log('missing params in URL fragment: host, path, uuid'); return; }
+  log('host: '+host+' path: '+wsPath);
+  const r1 = await test('www.gstatic.com', 80, 'GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n');
+  log('generate_204 -> '+r1.status+' ('+r1.label+', '+r1.rawBytes+' bytes)');
+  const r2 = await test('ifconfig.me', 80, 'GET /ip HTTP/1.1\r\nHost: ifconfig.me\r\nConnection: close\r\n\r\n');
+  log('ifconfig.me/ip -> '+r2.status+' body: '+r2.body+' ('+r2.label+')');
+  if(!r2.body){
+    const r3 = await test('ipinfo.io', 80, 'GET /ip HTTP/1.1\r\nHost: ipinfo.io\r\nConnection: close\r\n\r\n');
+    log('ipinfo.io/ip -> '+r3.status+' body: '+r3.body+' ('+r3.label+')');
+  }
+  log('DONE');
+})();
+</script>
+</body></html>
